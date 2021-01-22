@@ -1,0 +1,742 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE, echo=F}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+# Import packages
+```{r import,include=FALSE, echo=F}
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(dplyr)
+library(plyr)
+library(psych)
+library(imbalance)
+library(randomForest)
+library(pROC)
+library(InformationValue)
+library(rpart.plot)
+library(tidyverse)
+library(rpart)
+library(randomForest)
+library(klaR)
+library(class)
+library(algaeClassify)
+library(gbm)
+```
+# Introduction
+
+The dataset describes 30,000 card holders in Taiwan by their *demographic factors, payment history, bill statements and default payment status* from April 2005 to September 2005. 
+  
+### Firstly read in and inspect the dataset.
+  
+``` {r read-data,include=FALSE, echo=F}
+data.raw <- read.table("card.csv",sep=",",skip=2,header=FALSE) 
+header <- scan("card.csv",sep=",",nlines=2,what=character()) 
+names(data.raw) <- header[26:50]
+```
+``` {r dimen, echo=T}
+dim(data.raw)
+```
+``` {r head, echo=T}
+head(data.raw)
+```
+``` {r describe, include=FALSE, echo=F}
+describe(data.raw)
+```
+
+### Details:
+  
+Observed from above, each data sample is characterized by 23 attributes except its ID and target feature. Among these 23 attributes, there exists 9 *categorical variables* in which 3 of them are nominal(SEX,EDUCATION,MARRIAGE) while the other 6(PAY_0 to PAY_6) are ordinal. As they are currently interpreted as integers, typecasting might be necessary later on. 
+  
+The remaining 14 attributes are *ratio variables* (LIMIT_BAL,AGE,BILL_AMT1-BILL_AMT6,PAY_AMT1-PAY_AMT6). The target feature (default payment next month) is binary valued 0 (= not default) or 1 (= default).
+
+The aim of our project is *to evaluate and determine the most robust and accurately tuned model* for predicting default value (yes or no) based on the 23 explanatory attributes. 
+  
+
+# Data Preparation
+
+### 1. Remove the ID attribute
+
+As ID variable plays no role in predicting the target feature, we decide to exclude it from our analysis.
+  
+``` {r removeid,include=FALSE, echo=F}
+data <- data.raw[,2:25]
+```
+
+### 2. Rename the attributes
+
+Change *default payment next month* to *default* for simplicity.
+  
+``` {r rename2, include=FALSE, echo=F}
+colnames(data)[24] <- 'default'
+```
+
+Rename PAY_0 to PAY_1 to be more continuous.
+  
+
+``` {r rename}
+colnames(data)[6] <- 'PAY_1'
+```
+
+## 3. Check missing data
+
+Count all the incidence of not available values across the dataset.
+  
+``` {r missing, echo=TRUE}
+sum(sapply(data, is.na))
+```
+The count is zero thus there is no missing value in this dataset.  
+  
+  
+## 4. Identify undefined values
+
+### (a) MARRIAGE
+
+There is a category 0 undefined in the description of this dataset. Since we do not know the exact marital status of category 0, we merged class 0 into class 3 which indicates an unknown status.
+  
+### (b) EDUCATION
+
+Category 0, 5 and 6 are undefined and rarely occuring in the dataset thus we merge them into category '4' which later denotes 'Unknown' values.
+  
+## 5. Factorize categorical variables
+  
+Change them from int type to factor type and assign unique label names of each category.
+  
+``` {r factor, include=FALSE, echo=F}
+data$default <- factor(data$default)
+data$SEX <- factor(data$SEX)
+for (i in 1:nrow(data)) {
+  if (data[i,4] == 1) {
+    data[i,4] <- "Single"
+  } else if (data[i,4] == 2) {
+    data[i,4] <- "Married"
+  } else {
+    data[i,4] <- "other"
+  }
+}
+
+data$MARRIAGE <- factor(data$MARRIAGE)
+data$MARRIAGE <- relevel(data$MARRIAGE,"other")
+levels(data$default) <- c("Not Default", "Default")
+levels(data$SEX) <- c("Male", "Female")
+
+for (i in 1:nrow(data)) {
+  if (data[i,3] == 1) {
+    data[i,3] <- "Graduate"
+  } else if (data[i,3] == 2) {
+    data[i,3] <- "University" 
+  } else if (data[i,3] == 3) {
+    data[i,3] <- "High School" 
+  } else {
+    data[i,3] <- "Unknown" 
+  }
+}
+data$EDUCATION <- factor(data$EDUCATION)
+data$EDUCATION <- relevel(data$EDUCATION,"Unknown")
+data$PAY_1 <- factor(data$PAY_1)
+data$PAY_2 <- factor(data$PAY_2)
+data$PAY_3 <- factor(data$PAY_3)
+data$PAY_4 <- factor(data$PAY_4)
+data$PAY_5 <- factor(data$PAY_5)
+data$PAY_6 <- factor(data$PAY_6)
+```
+
+# Exploratory Data Analysis
+
+## 1. Target Attribute
+
+``` {r target, echo=F}
+summary(data$default)
+imbalanceRatio(data,classAttr='default')
+```
+The ratio of default payment next month is 0.28 amongst all customer payments, indicating that the dataset is imbalanced and should be considered when sampling.
+
+  
+## 2. Demographic variables
+
+First have a look at their summary statistics:
+
+``` {r education, echo=F, out.width="40%", fig.align="center"}
+summary(data$SEX)
+summary(data$EDUCATION)
+summary(data$MARRIAGE)
+```
+  
+From above:
+1. The proportion of female customers outweigh that of male customers by 50%.
+  
+2. The majority of clients have received University or Graduate education, with comparably less number of high school graduates.
+  
+3. The number of married clients is roughly comparable to that of single clients.
+  
+
+Now let's plot them against each other:
+
+### (a) Education, gender and balance limit
+  
+``` {r egb,echo=F,out.width = '40%'}
+ggplot(data, aes(SEX, (LIMIT_BAL), fill=EDUCATION)) + 
+  geom_boxplot() +
+  xlab("Gender") + 
+  ylab("Bal_limit") + 
+  scale_fill_brewer(palette = "Paired")
+```
+  
+Due to the lack of information on class 'unknown', we exclude it in our analysis.
+Our observations from above:
+  
+1. The more educated a client is, the more likely for him/her to have higher balance limit.
+  
+2. Gender seems to be irrelevant to balance limit.
+  
+3. More of the outliers are High School or University graduates.
+
+### (b) Sex, marriage and balance limit
+
+``` {r mgb, echo=F,out.width = '40%'}
+ggplot(data, aes(MARRIAGE, (LIMIT_BAL), fill=SEX)) + 
+  geom_boxplot() +
+  xlab("Marital Status") + 
+  ylab("Balance Limit")  +
+  scale_fill_brewer(palette = "Pair")
+```
+
+Observations from above:
+  
+1. Single clients have higher median, 1st and 3rd quantile values than married clients for both gender.
+  
+2. 'Other' clients have lower quantile values than both married and single clients. They might include some divorced or widowed clients.  
+  
+3. Marriage seems to have greater effect on males than on females, as observed from the gap between single males and married males.
+  
+4. Continued from above, the group of single males have the highest 1st quantile and median value across all groups.
+  
+5. The most deviated outlier is a single female.
+  
+
+
+## 3. Continuous Variables and their interactions
+
+### (a) Balance limit:
+
+FIrst plot the density function of LIMIT_BAL.
+
+``` {r plotden, echo=F, out.width = '40%'}
+ggplot(data, mapping = aes(x = LIMIT_BAL)) +
+  geom_histogram(aes(y=..density..), binwidth=5000, color="black", fill="white") +
+  geom_density(fill="red",alpha=0.3)
+```
+Observations:
+1. Balance limit is right skewed with unusually large outlier values (1,000,000).
+  
+2. The most aggregated group of clients has approximately 50,000 balance limit.
+  
+3. Most of the clients are located in the range from 0 to 500,000.
+
+
+### (b) Age
+
+``` {r age, echo=F}
+ggplot(data, aes(x=AGE , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+count(cut(data$AGE,c(10,20,30,40,50,60,70,80)))
+```
+Age is also right skewed with largest age group at around 27-29 years old. Elder clients (>60) are at minority. Default or not seems to distribute similarly across all ages.
+
+### (c) PAY_AMTs and BILL_AMTs
+
+``` {r pb}
+summary(data[,12:23])
+```
+Notice that there are negative entries in bill amount. It might be interpreted as the clients had prepaid their bills in the last month. Besides, all these attributes have extremely high-valued outliers, giving rise to the huge gaps between the 3rd quantile and the maximum. In later part we will seek to remove the skewness.
+
+Now let's explore the correlation among these attributes:
+
+``` {r overall, echo=F,out.width = '40%'}
+M <- cor(data.raw[,c(13:24)])
+corrplot(M,method="color",diag=F,type="upper",title='Overall correlation plot',tl.col='#4477AA',tl.cex=0.7,mar=c(0,0,1,0))
+```
+All bill amounts are closely correlated; the payment amounts are, however, weakly connected.
+Moderate correlations are found between each pair of BILL_AMT(n+1) and PAY_AMT(n) with n > 0. This can be interpreted as last month's payment amount directly affects this month's bill amount; namely the more paid last month, the less charged this month.
+
+
+Now take a look at their relations with default payment next month, which is categorical and we decide to use one-way anova test.
+
+Payment amounts with default payment next month:
+
+``` {r relation}
+anova(lm(data$PAY_AMT1~data$default))$`Pr(>F)`[1]
+anova(lm(data$PAY_AMT2~data$default))$`Pr(>F)`[1]
+anova(lm(data$PAY_AMT3~data$default))$`Pr(>F)`[1]
+anova(lm(data$PAY_AMT4~data$default))$`Pr(>F)`[1]
+anova(lm(data$PAY_AMT5~data$default))$`Pr(>F)`[1]
+anova(lm(data$PAY_AMT6~data$default))$`Pr(>F)`[1]
+```
+
+Bill amounts with default payment next month:
+``` {r relation1}
+anova(lm(data$BILL_AMT1~data$default))$`Pr(>F)`[1]
+anova(lm(data$BILL_AMT2~data$default))$`Pr(>F)`[1]
+anova(lm(data$BILL_AMT3~data$default))$`Pr(>F)`[1]
+anova(lm(data$BILL_AMT4~data$default))$`Pr(>F)`[1]
+anova(lm(data$BILL_AMT5~data$default))$`Pr(>F)`[1]
+anova(lm(data$BILL_AMT6~data$default))$`Pr(>F)`[1]
+```
+For all tests above, the null hypothesis is the pair of attributes is independent and the signifance level is 0.05.
+
+The common pattern is that the further away a payment or bill was made from now, the less likely for it to influence much on the default value next month. For payment amounts, all the p values are less than 0.05 and we conclude they have strong predictive power. For bill amounts, except the most recent 3 months, all others are not correlated to default payment next month.
+
+### (d) BILL_AMTs and balance limit
+
+``` {r plot}
+par(mfrow=c(3,2))
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT1, color=default)) +
+  geom_point()
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT2, color=default)) +
+  geom_point()
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT3, color=default)) +
+  geom_point()
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT4, color=default)) +
+  geom_point()
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT5, color=default)) +
+  geom_point()
+ggplot(data, aes(x=LIMIT_BAL, y=BILL_AMT6, color=default)) +
+  geom_point()
+```
+The triangular area suggests that firstly bill amounts are limited by the balance limit; secondly balance limit = 500000 is an important threshold value, under which most clients are located. Also the default clients often lie on the upper side of the triangle, which means default clients often meet their balance limit in their monthly bills.
+
+
+### (e) Principle Component Analysis
+
+From the exploration above, we realize that some continuous features are closely correlated. To find out and reduce the overlapped dimensions, we choose to analyze their principle components.
+
+``` {r pcaana}
+df <- data.frame(default = data$default,AGE = data$AGE,BILL_AMT1=double(30000),BILL_AMT2=double(30000),BILL_AMT3=double(30000),BILL_AMT4=double(30000),BILL_AMT5=double(30000),BILL_AMT6=double(30000),PAY_AMT1=double(30000),PAY_AMT2=double(30000),PAY_AMT3=double(30000),PAY_AMT4=double(30000),PAY_AMT5=double(30000),PAY_AMT6=double(30000))
+normalize <- function(vector) {
+  min <- min(vector)
+  max <- max(vector)
+  return (vector - min) / (max - min)
+}
+for (i in 3:ncol(df)) {
+  min <- min(data[,i+9])
+  df[,i] <- normalize(log(data[,i+9] - min + 1))
+}
+
+pca <- prcomp(df[,!(names(df) %in% c("default"))],scale=T)
+autoplot(pca,df,colour='default',loadings = TRUE, loadings.colour = 'black',
+         loadings.label = TRUE, loadings.label.size = 3)
+```
+Above plot suggests:
+1. PC2 is more likely to separate the default and not default clients.
+  
+2. Vectors of payment amounts are aggregated in the direction where more payment amounts indicate more default clients next month. They give stronger predictive power than bill amounts do as they are contributing more to PC2.
+  
+3. Vectors of bill amounts are less aggregated at the direction more bill amounts suggest higher possibility of going default next month.
+
+4. AGE is contributing little in this plot.
+  
+
+## 5. The series of PAY_Ns
+
+The frequencies:
+``` {r fre}
+summary(data[,6:11])
+```
+There is a considerable amount of undefined entries such as '0', '-2' existing across the dataset. To be more consistent with the dataset description, we regard '-2' as clients paid ahead of time, '-1' as on time, '0' as delayed yet the clients had balance to maintain for a while.
+
+
+``` {r preparation}
+p1 <- ggplot(data, aes(x=PAY_1 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+p2 <- ggplot(data, aes(x=PAY_2 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+p3 <- ggplot(data, aes(x=PAY_3 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+p4 <- ggplot(data, aes(x=PAY_4 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+p5 <- ggplot(data, aes(x=PAY_5 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+p6 <- ggplot(data, aes(x=PAY_6 , fill=default)) + 
+  geom_bar(colour="black", position="dodge")
+par(mfrow=c(3,2))
+p1
+p2
+p3
+p4
+p5
+p6
+```
+
+From the plot we can infer that clients who default next month are more likely to have paid behind time in previous months.
+
+Now let's take a look at their correlations along with balance limit.
+
+``` {r corrlat, echo-F}
+M <- cor(data.raw[,c(2,7:12)])
+corrplot(M,method="color",diag=F,type="upper",title='Overall correlation plot',tl.col='#4477AA',tl.cex=0.7,mar=c(0,0,1,0))
+```
+
+PAY_Ns are positively correlated, especially when the payment months are close. Balance limit is negatively correlated with all payment status moderately.
+
+## 6. Hypothesis Testing
+
+### Hypothesis 1: Does Sex correlate to marital status?
+  
+The null hypothesis is that sex is independent of marital status.
+  
+As both are categorical variables, we adopt the Chi-Square test.
+  
+``` {r relation2,echo=F}
+chisq.test(data$SEX,data$MARRIAGE)
+```
+  
+As the p-values is less than the threshold 0.05 (at 5% significance level), we have sufficient evidence to reject the hypotheses and conclude that sex is correlated to marital status.
+  
+
+### Hypothesis 2: Do clients with different default status next month have different mean balance limit?
+  
+As default value is categorical and balance limit is continuous, we adopt the one-way anova test.
+  
+``` {r oneway,echo=F}
+anova(lm(data$LIMIT_BAL~data$default))
+```
+  
+The resulting p-value is far less than 0.05, which provides us enough evidence to reject the null hypothesis that default payment next month is independent of balance limit. 
+
+### Hypothesis 3: do BILL_AMT(n+1) correlate to PAY_AMT(n) for n =1,2,3,4,5?
+
+The null hypothesis is that for all pair of attributes, their correlation coeffient is 0.
+
+``` {r scatter}
+par(mfrow=c(3,2))
+ggplot(data, aes(x=PAY_AMT1, y=BILL_AMT2)) + 
+  geom_point()+
+  geom_smooth(method=lm)
+ggplot(data, aes(x=PAY_AMT2, y=BILL_AMT3)) + 
+  geom_point()+
+  geom_smooth(method=lm)
+ggplot(data, aes(x=PAY_AMT3, y=BILL_AMT4)) + 
+  geom_point()+
+  geom_smooth(method=lm)
+ggplot(data, aes(x=PAY_AMT4, y=BILL_AMT5)) + 
+  geom_point()+
+  geom_smooth(method=lm)
+ggplot(data, aes(x=PAY_AMT5, y=BILL_AMT6)) + 
+  geom_point()+
+  geom_smooth(method=lm)
+```
+The scatter plot suggests that they are linearly correlated. Now we do some cor.tests to check for this.
+
+``` {r corr.test}
+cor.test(data$PAY_AMT1,data$BILL_AMT2)$p.value 
+cor.test(data$PAY_AMT2,data$BILL_AMT3)$p.value
+cor.test(data$PAY_AMT3,data$BILL_AMT4)$p.value
+cor.test(data$PAY_AMT4,data$BILL_AMT5)$p.value
+cor.test(data$PAY_AMT5,data$BILL_AMT6)$p.value
+```
+The resulting p-values are all smaller than 0.05. Thus we have sufficient evidence to reject the null hypothesis and conclude that BILL_AMT(n+1) is correlated to PAY_AMT(n) (for n =1,2,3,4,5)
+
+
+# Data Transformation and feature selection
+
+## 1. Include new terms:
+
+Add in new term SingleMale indicating whether a client is a single male;
+
+Add in new terms bill_limit (6 in all) which calculates the difference between the monthly bill and the balance limit, then normalized by the balance limit.
+
+Add in new terms expenseN to derive more information on client expenditure, which is computed by (last month's bill - (this month's bill - last months payment)) for month N.
+
+Add in new term goodClient which is binary-valued and indicates whether a client has balance limit > 500K;
+
+``` {r include-new}
+data$SingleMale <- factor(dummy.code(data$MARRIAGE)[,2] * dummy.code(data$SEX)[,1])
+data$bill_limit1 <- (data$LIMIT_BAL - data$BILL_AMT1) / data$LIMIT_BAL
+data$bill_limit2 <- (data$LIMIT_BAL - data$BILL_AMT2) / data$LIMIT_BAL
+data$bill_limit3 <- (data$LIMIT_BAL - data$BILL_AMT3) / data$LIMIT_BAL
+data$bill_limit4 <- (data$LIMIT_BAL - data$BILL_AMT4) / data$LIMIT_BAL
+data$bill_limit5 <- (data$LIMIT_BAL - data$BILL_AMT5) / data$LIMIT_BAL
+data$bill_limit6 <- (data$LIMIT_BAL - data$BILL_AMT6) / data$LIMIT_BAL
+data$goodClient <- factor(data$LIMIT_BAL > 500000)
+data$expense5 <- (data$BILL_AMT5 - (data$BILL_AMT6 - data$PAY_AMT5)) / data$LIMIT_BAL
+data$expense4 <- (((data$BILL_AMT5 - (data$BILL_AMT6 - data$PAY_AMT5)) + (data$BILL_AMT4 - (data$BILL_AMT5 - data$PAY_AMT4))) / 2) / data$LIMIT_BAL
+data$expense3 <- (((data$BILL_AMT5 - (data$BILL_AMT6 - data$PAY_AMT5)) + (data$BILL_AMT4 - (data$BILL_AMT5 - data$PAY_AMT4)) + (data$BILL_AMT3 - (data$BILL_AMT4 - data$PAY_AMT3))) / 3) / data$LIMIT_BAL
+data$expense2 <- (((data$BILL_AMT5 - (data$BILL_AMT6 - data$PAY_AMT5)) + (data$BILL_AMT4 - (data$BILL_AMT5 - data$PAY_AMT4)) + (data$BILL_AMT3 - (data$BILL_AMT4 - data$PAY_AMT3)) + (data$BILL_AMT2 - (data$BILL_AMT3 - data$PAY_AMT2))) / 4) / data$LIMIT_BAL
+data$expense1 <- (((data$BILL_AMT5 - (data$BILL_AMT6 - data$PAY_AMT5)) + (data$BILL_AMT4 - (data$BILL_AMT5 - data$PAY_AMT4)) + (data$BILL_AMT3 - (data$BILL_AMT4 - data$PAY_AMT3)) + (data$BILL_AMT2 - (data$BILL_AMT3 - data$PAY_AMT2)) + (data$BILL_AMT1 - (data$BILL_AMT2 - data$PAY_AMT1))) / 5) / data$LIMIT_BAL
+```
+
+``` {r corrla1, echo-F}
+M <- cor(data[,c(26:31,33:37)])
+corrplot(M,method="color",diag=F,type="upper",title='Overall correlation plot',tl.col='#4477AA',tl.cex=0.7,mar=c(0,0,1,0))
+```
+
+
+Clearly from the plot that the newly added set of features (bill_limit1-6 and expense1-5) are strongly correlated, while expenses and balance limits have nontrivial negative correlation coefficients. Next part we'll apply PCA to reduce their dimensions.
+
+## 2. Attribute transformation:
+
+### 2.1 PAY_Ns
+
+Since all entries less than or equal to 0 are assumed to be payments on time while the rest are overdue payments, we classify and assign new binary attributes pay(n) to indicate whether the client are good payers for each month. (PAY_N > 0 or not)
+
+Then we combine all pay(n) into one attribute named payStatus, which is 0 if all payn's are zero; 1 otherwise.
+
+``` {r classify, echo=F}
+data$pay1 <- ifelse((data.raw$PAY_0) > 0, 0, 1)
+data$pay2 <- ifelse((data.raw$PAY_2) > 0, 0, 1)
+data$pay3 <- ifelse((data.raw$PAY_3) > 0, 0, 1)
+data$pay4 <- ifelse((data.raw$PAY_4) > 0, 0, 1)
+data$pay5 <- ifelse((data.raw$PAY_5) > 0, 0, 1)
+data$pay6 <- ifelse((data.raw$PAY_6) > 0, 0, 1)
+data_clean <- data[,!(names(data) %in% c("PAY_1","PAY_2","PAY_3","PAY_4","PAY_5","PAY_6","BILL_AMT1","BILL_AMT2","BILL_AMT3","BILL_AMT4","BILL_AMT5","BILL_AMT6"))]
+```
+ 
+ 
+### 2.2 BILL_AMTs
+
+The series of bill amounts have been illustrated to be closely correlated, thus we substitute for their principle components to reduce the overlapped dimensions.
+
+``` {r pca, echo = F, out.width="40%"}
+
+pca <- prcomp(data[,c(26:31,33:37)], scale = T)
+exp_var = (pca$sdev)^2 / sum(( pca$sdev )^2)
+plot(exp_var, xlab = "Principal Components", ylab = "Explained Variance", type = "b" )
+```
+
+First two PCs explain over 98% of the total variance. Thus we substitute the bill amounts for these 2 PCs to simplify our model.
+
+``` {r sub}
+data_clean$bill_amt1 <- pca$x[,1] 
+data_clean$bill_amt2 <- pca$x[,2]
+```
+
+### 2.3 Bill_limits and expenses
+
+As plotted in part 1, we have two sets of strongly correlated features. Now we try to find their principle components.
+
+``` {r pca+, echo = F, out.width="40%"}
+pca1 <- prcomp(data[,c(26:31,33:37)], scale = T)
+exp_var1 = (pca1$sdev)^2 / sum(( pca1$sdev )^2)
+plot(exp_var1, xlab = "Principal Components", ylab = "Explained Variance", type = "b" )
+cum <- cumsum(exp_var1)
+plot(cum, xlab = "Principal Components",ylab = "Cumulated Explained Variance",type = "b")
+```
+It turns out that choosing 6 out of the 11 components can already explain over 98% of the original variance. Thus we remove the 11 features and include the new 6 PCs instead.
+
+``` {r removeandinclude}
+data_final <- data_clean[,!(names(data_clean) %in% c("expense1","expense2","expense3","expense4","expense5","bill_limit1","bill_limit2","bill_limit3","bill_limit4","bill_limit5","bill_limit6"))]
+data_final[,23:28] <- pca1$x[,1:6]
+colnames(data_final)[23:28] <- c("bill_exp1","bill_exp2","bill_exp3","bill_exp4","bill_exp5","bill_exp6")
+```
+
+## 3. Split train, test set:
+
+The dataset is quite imbalanced (0.28) against the default clients next month. To overcome the imbalance, we chose to use the stratified sampling approach, i.e. select equal proportion of default clients in each set.
+
+``` {r split1}
+library(splitTools)
+inds <- partition(data_final$default, p=c(train = 0.75, test = 0.25))
+train.data <- data_final[inds$train,]
+test.data <- data_final[inds$test,]
+train.class <- train.data$default
+test.class <- test.data$default
+```
+
+Ths ratio of the train and test set size is approximately 3:1. And the count of default customers in each set is:
+
+``` {r unbal}
+count(train.data$default)
+count(test.data$default)
+c(imbalanceRatio(train.data,classAttr = "default"),imbalanceRatio(test.data,classAttr = "default"))
+```
+The data samples are stratified on their default status in two sets.
+
+## 4. Feature Selection
+
+The stats function to evaluate the model performance is given below:
+
+```{r stats fxn}
+get_stats <- function(model_results, test_data, model_name){
+  cm <- table(actual = test_data,pred = model_results)
+  print(cm)
+  n <- cm[1] + cm[2] + cm[3] + cm[4]
+  accuracy <- sum(diag(cm))/n
+  fpr <- cm[2]/(cm[2] + cm[4])
+  fnr <- cm[3]/(cm[3] + cm[1])
+  recall <- cm[1]/(cm[3]+cm[1])
+  precision <- cm[1]/(cm[1]+cm[2])
+  f1 <- (2*precision*recall)/(precision + recall)
+  cat("Precision: ", precision,"\n")
+  cat("Recall: ", recall,"\n")
+  cat("Accuracy: ", accuracy,"\n")
+  cat("FPR: ", fpr,"\n")
+  cat("FNR: ", fnr,"\n")
+  cat("F1 score: ",f1,"\n")
+  final <- matrix(c(n,accuracy,fpr,fnr,recall,precision,f1),nrow=1,byrow=TRUE)
+  colnames(final) <- c("Total Samples","Accuracy","FPR","FNR","Recall","Precision","F1 Score")
+  rownames(final) <- model_name
+  final <- as.table(final)
+  return(final)
+}
+```
+
+Now we adopted the logistic regression and performed step-wise feature selection process on the full model.
+
+``` {r logis}
+# Full model construction:
+full <- glm(default~.,data=train.data,family="binomial")
+
+# Step-wise feature selection (backward):
+step <- full %>% stepAIC(trace = FALSE)
+
+# Selection results:
+step$anova
+```
+
+Final logistic model's performance on the testset: 
+
+``` {r perf}
+# Predict on the testset.
+pred <- predict(step, newdata=test.data, type="response")
+predbin <- factor(ifelse(pred<0.5,"Not Default","Default"))
+predbin <- relevel(predbin,"Not Default") # Rotate the order of levels to make confusion matrix
+
+# Summary statistics
+glm <- get_stats(predbin,test.class,"glm")
+```
+
+The retained features are LIMIT_BAL, EDUCATION, AGE, MARRIAGE, SingleMale, PAY_AMT1, PAY_AMT2, PAY_AMT5, SingleMale, bill_exp3, bill_exp6, pay1, pay2, pay3, pay4, pay5, pay6, bill_amt1.
+
+``` {r drop}
+# Retained selected features.
+train.log <- train.data[,!(names(train.data) %in% c("SEX","PAY_AMT3","PAY_AMT4","PAY_AMT6","bill_exp1","bill_exp2","bill_exp4","bill_exp5","bill_amt2","SEX","goodClient"))]
+test.log <- test.data[,!(names(test.data) %in% c("SEX","PAY_AMT3","PAY_AMT4","PAY_AMT6","bill_exp1","bill_exp2","bill_exp4","bill_exp5","bill_amt2","SEX","goodClient"))] 
+
+# Extract target feature.
+train.clog <- train.log$default
+test.clog <- test.log$default
+```
+
+
+# Model Selection
+
+## 0. Null model
+
+If all clients were to be predicted not default, the accuracy would be 1 - 0.2840 (imbalance ratio) = 0.7160. Thus our models' performance should be no worse than this.
+
+## 1. Random Forest
+
+Random forest is a tree-based ensembling method for classification purpose. We firstly tuned the model by adjusting the number of variables chosen in each split of tree (mtry); then make predictions on the testset and summarise the result.
+
+``` {r randomF}
+set.seed(123)
+rf.model <- tuneRF(train.log[,!(names(train.log) %in% c("default"))],train.log$default, ntreeTry=600,stepFactor=1.5, doBest=TRUE)
+varImpPlot(rf.model,main="Variable Importance")
+test.pred.rf <- predict(rf.model, test.log)
+rf <- get_stats(test.pred.rf, test.clog,"Random Forest")
+```
+## 2. Decision Tree
+
+Using a decision tree, we have 39 predictors to predict if a customer belongs in class 'Not Default' or 'Default' using repeated cross validation and reducing GINI as the criteria in splitting of the tree.
+
+From the result, the height of tree is 6, meaning each data point is split at most 6 times to reach a decision if it falls in default or not.
+
+```{r dec tree}
+library(caret)
+anyNA(train.log)
+train <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+set.seed(123)
+tree.model <- train(default ~., data = train.log, method = "rpart",  parms = list(split = "gini"), trControl = train, tuneLength = 10)
+predicted.response <- predict(tree.model, test.log)
+prp(tree.model$finalModel, box.palette = "Red", tweak = 1.2)
+dt <- get_stats(predicted.response, test.log$default,"Decision Tree")
+```
+An accuracy of 0.8264 is achieved, with sensitivity at 0.8525 and specificity at 0.3624. We can see that this model is bad at predicting True Negatives(Default), as it has predicted 1022 false negative and only 581 true negatives(Default). Thus, we look for other means that can increase the accuracy of prediction.
+
+
+## 3. SVM 
+
+``` {r load-datasets, echo=TRUE}
+library(e1071) 
+set.seed(123) 
+```
+
+``` {r svm, echo=TRUE}
+# "C-Classification" 
+svm_radial <- svm(default ~., data = train.log,type="C-classification",
+                 kernel="radial") 
+summary(svm_radial)
+#High computational cost(takes a long time and with 10313 support vectors)
+# use the model to predict for train set and test set
+results_test <- predict(svm_radial, test.log ) 
+svm <- get_stats(results_test, test.log$default,"SVM radial")
+```
+
+## 4. Naive Bayes
+
+```{r bayes, echo=F}
+set.seed(123)
+library(e1071)
+library(caret,quietly = T)
+x = train.log[,-8] 
+y = train.log$default
+nb.model = train(x,y,'nb',trControl=trainControl(method='cv',number=10))
+nb.model
+```
+
+```{r bayeseva, echo=FALSE}
+nb.pred <- predict(nb.model,newdata = test.log)
+nb <- get_stats(nb.pred, test.clog,"Naive Bayes")
+```
+An Naive Bayes classifier built to predict the default payment next month of a card holder. The output above shows that this Naive Bayes classifier has an accuracy of approximately 81%.
+
+To summaries the demo, the plot below shows how each predictor variable is independently responsible for predicting the outcome.
+
+```{r bayesplot,echo=F}
+X <- varImp(nb.model)
+plot(X)
+```
+
+#Evaluation of model selection
+
+``` {r stats table,echo=F}
+table <- rbind(glm, rf, dt, svm, nb, gbm)
+table %>% knitr::kable(caption = "Evaluation Table", digit = 2)
+```
+
+``` {r probresults}
+glm.prob <- predict(step, newdata=test.data,type="response")
+rf.prob <- predict(rf.model, newdata=test.log[,-8],type="prob")
+svm.prob <- predict(svm.model, newdata=test.log[,-8],type="prob")
+dt.prob <- predict(tree.model, newdata=test.log[,-8],type="prob")
+nb.prob <- predict(nb.model, newdata=test.log[,-8],type="prob")
+```
+
+``` {r rocplots,echo=F}
+roclist <- list("glm" = roc(test.class,glm.prob,quiet=T), "rf" = roc(test.clog,rf.prob[,1],quiet=T), "dt" = roc(test.clog,tree.prob[,2],quiet=T),"svm" = roc(test.clog,ifelse(svm.prob == "Default", 1, 0),quiet=T), "nb" = roc(test.clog,nb.prob[,1],quiet=T))
+ggroc(roclist,linetype = 1, size = 1, show.legend=T) +
+  ggtitle("ROC Curve") +
+  labs(x = "1 - Specificity",
+       y = "Sensitivity",
+       linetype = "Models")
+```
+
+``` {r printroc}
+cat("Area under ROC: \n")
+cat("Generlised Linear Model",roc.glm$auc,"\n")
+cat("Random Forest: ",roc.rf$auc,"\n")
+cat("Decision Tree: ",roc.dt$auc,"\n")
+cat("Support Vector Machine: ",roc.svm$auc,"\n")
+cat("Naive Bayes: ",roc.nb$auc,"\n")
+cat("Gradient Boosting Machine: ",roc.gbm$auc,"\n")
+```
+
+
